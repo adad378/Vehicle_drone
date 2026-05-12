@@ -713,8 +713,9 @@ for idx = 1:n_vehicle
     end
 
     % ===== 步骤3: 贪心寻找最近发射/回收点 (发射点≠回收点≠服务点) =====
-    % 候选集合 = 仓库 + 当前车辆路径上未被标记且未锁定的节点, 排除当前服务节点
-    remaining_vehicle_nodes = vehicle_inner(~is_drone_served & ~is_locked);
+    % 候选集合 = 仓库 + 当前车辆路径上未被标记的节点, 排除当前服务节点
+    % (已锁定的起降点可被其他任务共享)
+    remaining_vehicle_nodes = vehicle_inner(~is_drone_served);
     remaining_vehicle_nodes = remaining_vehicle_nodes(remaining_vehicle_nodes ~= node);
     remaining_vehicle_nodes = [warehouse, remaining_vehicle_nodes, warehouse];
 
@@ -842,8 +843,9 @@ for p = 1:n_inner
     end
 
     %在剩余车辆节点中找最优发射/回收点对
-    % 剩余车辆节点 = 未被无人机服务且未被锁定的节点 + 仓库，排除当前服务节点
-    remaining_vehicle_nodes = vehicle_inner(~is_drone_served & ~is_locked);
+    % 剩余车辆节点 = 未被无人机服务的节点 + 仓库，排除当前服务节点
+    % (已锁定的起降点可被其他任务共享)
+    remaining_vehicle_nodes = vehicle_inner(~is_drone_served);
     remaining_vehicle_nodes = remaining_vehicle_nodes(remaining_vehicle_nodes ~= node);
     remaining_vehicle_nodes = [warehouse, remaining_vehicle_nodes, warehouse];
 
