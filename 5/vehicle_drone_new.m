@@ -174,59 +174,56 @@ for gen = 2:max_gen
     % 生成新一代种群
     new_population = cell(pop_size, 1);
 
-    % 精英保留
+    %% 精英保留
     [~, sort_idx] = sort(fitness, 'descend');
     for e = 1:elite_count
         elite_chrom = population{sort_idx(e)};
         if length(elite_chrom.vehicle_route) >= 3
-            [drone_A_new, drone_B_new, vr_new] = random_drone_assignment(...
-                elite_chrom.vehicle_route, demands, dist_matrix, ...
-                V_A, V_B, W_A, W_B, U_A, U_B);
-            if ~isempty(drone_A_new) || ~isempty(drone_B_new)
-                elite_chrom.drone_A_tasks = drone_A_new;
-                elite_chrom.drone_B_tasks = drone_B_new;
-                elite_chrom.vehicle_route = vr_new;
-                elite_chrom = resolve_drone_conflicts(elite_chrom, n_nodes, warehouse);
+                %elite_chrom = resolve_drone_conflicts(elite_chrom, n_nodes, warehouse);
                 elite_chrom = validate_and_repair(elite_chrom, n_nodes, warehouse, ...
                     demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
-            end
         end
         new_population{e} = elite_chrom;
     end
 
-    % 生成剩余个体
-    for i = elite_count+1:pop_size
-        % 锦标赛选择
-        parent1 = tournament_select(population, fitness, tournament_k);
-        parent2 = tournament_select(population, fitness, tournament_k);
+    % % 生成剩余个体
+    % for i = elite_count+1:pop_size
+    %     % 锦标赛选择
+    %     parent1 = tournament_select(population, fitness, tournament_k);
+    %     parent2 = tournament_select(population, fitness, tournament_k);
 
-        % 动态协同交叉
-        if rand() < Pc
-            offspring = dynamic_cooperative_crossover(parent1, parent2, ...
-                demands, dist_matrix, V_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
-                n_nodes, warehouse);
-        else
-            offspring = parent1;
+    %     % 动态协同交叉
+    %     if rand() < Pc
+    %         offspring = dynamic_cooperative_crossover(parent1, parent2, ...
+    %             demands, dist_matrix, V_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
+    %             n_nodes, warehouse);
+    %     else
+    %         offspring = parent1;
+    %     end
+
+    %     % 路径翻转 (2-opt局部搜索)
+    %     offspring.vehicle_route = two_opt_local_search_fast(offspring.vehicle_route, dist_matrix, warehouse);
+
+    %     % 约束感知变异
+    %     if rand() < Pm
+    %         offspring = constraint_aware_mutation(offspring, demands, dist_matrix, ...
+    %             V_A, V_B, W_A, W_B, U_A, U_B, n_nodes, warehouse);
+    %         offspring.vehicle_route = two_opt_local_search_fast(offspring.vehicle_route, dist_matrix, warehouse);
+    %     end
+
+    %     % 完整性校验和修复 (防止交叉/变异引入不可行解)
+    %     offspring = validate_and_repair(offspring, n_nodes, warehouse, ...
+    %         demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
+
+    %     new_population{i} = offspring;
+    %end
+
+    % ===== 更新种群 (测试标注: 遗传操作已注释, 空位回填原种群) =====
+    for i = 1:pop_size
+        if isempty(new_population{i})
+            new_population{i} = population{i};  % 回填原种群个体
         end
-
-        % 路径翻转 (2-opt局部搜索)
-        offspring.vehicle_route = two_opt_local_search_fast(offspring.vehicle_route, dist_matrix, warehouse);
-
-        % 约束感知变异
-        if rand() < Pm
-            offspring = constraint_aware_mutation(offspring, demands, dist_matrix, ...
-                V_A, V_B, W_A, W_B, U_A, U_B, n_nodes, warehouse);
-            offspring.vehicle_route = two_opt_local_search_fast(offspring.vehicle_route, dist_matrix, warehouse);
-        end
-
-        % 完整性校验和修复 (防止交叉/变异引入不可行解)
-        offspring = validate_and_repair(offspring, n_nodes, warehouse, ...
-            demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
-
-        new_population{i} = offspring;
     end
-
-    % 更新种群
     population = new_population;
 
     % 适应度评估
@@ -263,10 +260,10 @@ end
 
 run_time = toc;
 
-% 局部搜索优化最终解 (降低迭代次数以加速)
-best_chromosome = local_search_optimize(best_chromosome, demands, dist_matrix, ...
-    V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
-    n_nodes, warehouse, 20);
+% % 局部搜索优化最终解 (降低迭代次数以加速)
+% best_chromosome = local_search_optimize(best_chromosome, demands, dist_matrix, ...
+%     V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
+%     n_nodes, warehouse, 20);
 
 % 重新评估
 best_fitness = evaluate_fitness(best_chromosome, dist_matrix, demands, n_nodes, ...
@@ -1203,9 +1200,7 @@ if current_demand <= W_limit && ~isempty(current_nodes)
 end
 end
 
-%% ===========================================================================
-%%                 适应度评估 (使用预计算的距离矩阵)
-%% ===========================================================================
+%%适应度评估 (使用预计算的距离矩阵)
 function fitness = evaluate_fitness(chromosome, dist_matrix, demands, n_nodes, ...
     V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
     service_D_A, service_D_B, At_max, M)
@@ -1273,138 +1268,168 @@ if penalty > 0
 end
 end
 
-%% ===========================================================================
-%%                 解码求解 (计算总配送时间 - 使用数组替代Map)
-%% ===========================================================================
+%%解码求解 (计算总配送时间 - 使用数组替代Map)
 function [vehicle_route, drone_tasks_A, drone_tasks_B, total_time, details] = ...
     decode_solution(chromosome, dist_matrix, demands, n_nodes, ...
     V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
     service_D_A, service_D_B, At_max, M)
 
-% 提取车辆路径
+% ===== 步骤1: 提取路径和任务 =====
 vehicle_route = chromosome.vehicle_route;
 drone_tasks_A = chromosome.drone_A_tasks;
 drone_tasks_B = chromosome.drone_B_tasks;
 
-% 使用数组替代 containers.Map (大幅提速)
-veh_arrival_time = zeros(1, n_nodes) - 1;  % -1 表示未到达
-veh_depart_time = zeros(1, n_nodes) - 1;   % -1 表示未离开
+% ===== 步骤2: 第一遍遍历车辆路径, 计算基础到达/离开时间 (不考虑无人机等待) =====
+base_arrival = zeros(1, n_nodes) - 1;
+base_depart  = zeros(1, n_nodes) - 1;
+base_arrival(vehicle_route(1)) = 0;
+base_depart(vehicle_route(1))  = 0;
 
-% 初始化仓库
-veh_arrival_time(vehicle_route(1)) = 0;
-veh_depart_time(vehicle_route(1)) = 0;
-
-% 车辆按路径行驶
 current_time = 0;
 for i = 1:length(vehicle_route)-1
     from_node = vehicle_route(i);
-    to_node = vehicle_route(i+1);
+    to_node   = vehicle_route(i+1);
     travel_time = dist_matrix(from_node, to_node) / V_T;
     current_time = current_time + travel_time;
 
-    if veh_arrival_time(to_node) < 0
-        veh_arrival_time(to_node) = current_time;
+    if base_arrival(to_node) < 0
+        base_arrival(to_node) = current_time;
     else
-        veh_arrival_time(to_node) = max(veh_arrival_time(to_node), current_time);
+        base_arrival(to_node) = max(base_arrival(to_node), current_time);
     end
-    current_time = veh_arrival_time(to_node) + service_T;
-    veh_depart_time(to_node) = current_time;
+    current_time = base_arrival(to_node) + service_T;
+    base_depart(to_node) = current_time;
 end
 
-% 计算无人机任务完成时间
-all_drone_end_times = [];
+% ===== 步骤3: 收集所有无人机任务信息 =====
+% 每条记录: .launch, .recovery, .t_drone_back, .type ('A'/'B')
+all_drone_info = [];
 
 % 处理无人机A任务
 for k = 1:size(drone_tasks_A, 1)
-    launch = drone_tasks_A{k, 1};
-    service_nodes = drone_tasks_A{k, 2};
-    if iscell(service_nodes), service_nodes = cell2mat(service_nodes); end
-    recovery = drone_tasks_A{k, 3};
+    L = drone_tasks_A{k, 1};
+    SN = drone_tasks_A{k, 2};
+    if iscell(SN), SN = cell2mat(SN); end
+    R = drone_tasks_A{k, 3};
 
-    % 无人机从车辆发射
-    if veh_arrival_time(launch) >= 0
-        drone_start = veh_arrival_time(launch);
+    % 无人机起飞时间 = 车辆到达发射点的时间
+    if base_arrival(L) >= 0
+        t_launch = base_arrival(L);
     else
-        drone_start = 0;
+        t_launch = 0;
     end
 
-    % 飞行到服务节点
-    flight_time = dist_matrix(launch, service_nodes(1)) / V_A;
-    drone_current_time = drone_start + flight_time;
-
-    % 在服务节点服务
-    drone_current_time = drone_current_time + service_D_A;
-
-    % 多个服务节点间的飞行
-    for s = 1:length(service_nodes)-1
-        flight_time = dist_matrix(service_nodes(s), service_nodes(s+1)) / V_A;
-        drone_current_time = drone_current_time + flight_time + service_D_A;
+    % 飞行 + 服务时间累加
+    t_drone = t_launch;
+    t_drone = t_drone + dist_matrix(L, SN(1)) / V_A;        % 飞到第一个服务点
+    t_drone = t_drone + service_D_A;                         % 服务
+    for s = 1:length(SN)-1
+        t_drone = t_drone + dist_matrix(SN(s), SN(s+1)) / V_A;
+        t_drone = t_drone + service_D_A;
     end
+    t_drone = t_drone + dist_matrix(SN(end), R) / V_A;      % 飞到回收点
 
-    % 飞到回收点
-    flight_time = dist_matrix(service_nodes(end), recovery) / V_A;
-    drone_arrival_recovery = drone_current_time + flight_time;
-
-    % 车辆到达回收点的时间
-    if veh_arrival_time(recovery) >= 0
-        veh_at_recovery = veh_arrival_time(recovery);
-    else
-        veh_at_recovery = 0;
-    end
-
-    all_drone_end_times = [all_drone_end_times, max(drone_arrival_recovery, veh_at_recovery)];
+    all_drone_info = [all_drone_info, struct('launch', L, 'recovery', R, ...
+        't_drone_back', t_drone, 'type', 'A', 'task_idx', k)];
 end
 
 % 处理无人机B任务
 for k = 1:size(drone_tasks_B, 1)
-    launch = drone_tasks_B{k, 1};
-    service_nodes = drone_tasks_B{k, 2};
-    if iscell(service_nodes), service_nodes = cell2mat(service_nodes); end
-    recovery = drone_tasks_B{k, 3};
+    L = drone_tasks_B{k, 1};
+    SN = drone_tasks_B{k, 2};
+    if iscell(SN), SN = cell2mat(SN); end
+    R = drone_tasks_B{k, 3};
 
-    if veh_arrival_time(launch) >= 0
-        drone_start = veh_arrival_time(launch);
+    if base_arrival(L) >= 0
+        t_launch = base_arrival(L);
     else
-        drone_start = 0;
+        t_launch = 0;
     end
 
-    flight_time = dist_matrix(launch, service_nodes(1)) / V_B;
-    drone_current_time = drone_start + flight_time;
-    drone_current_time = drone_current_time + service_D_B;
-
-    for s = 1:length(service_nodes)-1
-        flight_time = dist_matrix(service_nodes(s), service_nodes(s+1)) / V_B;
-        drone_current_time = drone_current_time + flight_time + service_D_B;
+    t_drone = t_launch;
+    t_drone = t_drone + dist_matrix(L, SN(1)) / V_B;
+    t_drone = t_drone + service_D_B;
+    for s = 1:length(SN)-1
+        t_drone = t_drone + dist_matrix(SN(s), SN(s+1)) / V_B;
+        t_drone = t_drone + service_D_B;
     end
+    t_drone = t_drone + dist_matrix(SN(end), R) / V_B;
 
-    flight_time = dist_matrix(service_nodes(end), recovery) / V_B;
-    drone_arrival_recovery = drone_current_time + flight_time;
-
-    if veh_arrival_time(recovery) >= 0
-        veh_at_recovery = veh_arrival_time(recovery);
-    else
-        veh_at_recovery = 0;
-    end
-
-    all_drone_end_times = [all_drone_end_times, max(drone_arrival_recovery, veh_at_recovery)];
+    all_drone_info = [all_drone_info, struct('launch', L, 'recovery', R, ...
+        't_drone_back', t_drone, 'type', 'B', 'task_idx', k)];
 end
 
-% 总配送时间 = max(车辆返回时间, 所有无人机任务完成时间)
-vehicle_return_time = veh_arrival_time(vehicle_route(end));
+% 构建"回收点→该回收点所有无人机的飞回时间"映射
+recovery_map = cell(1, n_nodes);  % recovery_map{node} = [t_back1, t_back2, ...]
+for d = 1:length(all_drone_info)
+    r_node = all_drone_info(d).recovery;
+    if r_node > 0 && r_node <= n_nodes
+        recovery_map{r_node} = [recovery_map{r_node}, all_drone_info(d).t_drone_back];
+    end
+end
+
+% ===== 步骤4: 第二遍遍历车辆路径, 动态处理回收点等待 =====
+real_arrival = zeros(1, n_nodes) - 1;
+real_depart  = zeros(1, n_nodes) - 1;
+real_arrival(vehicle_route(1)) = 0;
+real_depart(vehicle_route(1))  = 0;
+
+current_time = 0;
+for i = 1:length(vehicle_route)-1
+    from_node = vehicle_route(i);
+    to_node   = vehicle_route(i+1);
+
+    % 行驶到下一节点
+    travel_time = dist_matrix(from_node, to_node) / V_T;
+    current_time = current_time + travel_time;
+    real_arrival(to_node) = current_time;
+
+    % 检查当前节点是否有无人机需要回收
+    drone_back_times = recovery_map{to_node};
+    if ~isempty(drone_back_times)
+        % 必须等待所有以该点为回收点的无人机飞回
+        latest_back = max(drone_back_times);
+        if current_time < latest_back
+            current_time = latest_back;  % 等待无人机
+        end
+    end
+
+    % 服务时间
+    current_time = current_time + service_T;
+    real_depart(to_node) = current_time;
+end
+
+% ===== 步骤5: 计算无人机任务完成时间 (车辆时间已包含等待) =====
+all_drone_end_times = [];
+for d = 1:length(all_drone_info)
+    r_node = all_drone_info(d).recovery;
+    if r_node > 0 && r_node <= n_nodes && real_arrival(r_node) >= 0
+        drone_end = max(all_drone_info(d).t_drone_back, real_arrival(r_node));
+    else
+        drone_end = all_drone_info(d).t_drone_back;
+    end
+    all_drone_end_times = [all_drone_end_times, drone_end];
+end
+
+% ===== 步骤6: 总时间 = 车辆真实返回仓库时间 =====
+vehicle_return_time = real_arrival(vehicle_route(end));
 if vehicle_return_time < 0
-    vehicle_return_time = 999999;  % 车辆没返回仓库, 很大惩罚
+    vehicle_return_time = 999999;
 end
 
-if isempty(all_drone_end_times)
-    total_time = vehicle_return_time;
-else
-    total_time = max(vehicle_return_time, max(all_drone_end_times));
+% 车辆时间已包含所有等待, 因此总时间就是车辆真实返回时间
+total_time = vehicle_return_time;
+
+% 如果还有无人机晚于车辆(理论上不应发生), 取最大值兜底
+if ~isempty(all_drone_end_times)
+    total_time = max(total_time, max(all_drone_end_times));
 end
 
 % 保存详细信息
 details.vehicle_return_time = vehicle_return_time;
 details.drone_end_times = all_drone_end_times;
-details.veh_arrival_time = veh_arrival_time;
+details.base_arrival = base_arrival;
+details.real_arrival = real_arrival;
 end
 
 %% ===========================================================================
@@ -1722,9 +1747,7 @@ end
 tasks = new_tasks;
 end
 
-%% ===========================================================================
-%%                 解决无人机任务冲突
-%% ===========================================================================
+%%解决无人机任务冲突
 function offspring = resolve_drone_conflicts(offspring, n_nodes, warehouse)
 % 收集所有被无人机服务的节点
 drone_A_nodes = [];
