@@ -40,7 +40,7 @@ alpha = 0.2;            % 交叉概率调整权重
 fprintf('============================================\n\n');
 
 %% 获取算例数据
-[coords, demands, case_name] = get_crood_data('a1');
+[coords, demands, case_name] = get_crood_data('c1');
 n_nodes = size(coords, 1);
 warehouse = 1;
 
@@ -2176,26 +2176,28 @@ end
 
 %%约束感知变异策略
 function offspring = constraint_aware_mutation(chromosome, demands, dist_matrix, ...
-    V_A, V_B, W_A, W_B, U_A, U_B, n_nodes, warehouse)
+    V_A, V_B, W_A, W_B, U_A, U_B, n_nodes, warehouse, Pm)
 
 offspring = chromosome;
 
-% 1. 车辆路径变异 - 2-opt路径翻转
-vr = offspring.vehicle_route;
-if length(vr) >= 5  % 至少需要仓库 + 2个中间节点 + 仓库
-    % 随机选两个位置 (在内部节点中)
-    inner = vr(2:end-1);
-    if length(inner) >= 2
-        i = randi(length(inner)-1);
-        j = randi([i+1, length(inner)]);
+% 1. 车辆路径变异 - 2-opt路径翻转 (按自适应变异概率Pm触发)
+if rand() < Pm
+    vr = offspring.vehicle_route;
+    if length(vr) >= 5  % 至少需要仓库 + 2个中间节点 + 仓库
+        % 随机选两个位置 (在内部节点中)
+        inner = vr(2:end-1);
+        if length(inner) >= 2
+            i = randi(length(inner)-1);
+            j = randi([i+1, length(inner)]);
 
-        % 翻转i+1到j段
-        inner(i:j) = fliplr(inner(i:j));
-        vr = [warehouse, inner, warehouse];
+            % 翻转i+1到j段
+            inner(i:j) = fliplr(inner(i:j));
+            vr = [warehouse, inner, warehouse];
 
-        % 检查闭合性
-        if vr(1) == warehouse && vr(end) == warehouse
-            offspring.vehicle_route = vr;
+            % 检查闭合性
+            if vr(1) == warehouse && vr(end) == warehouse
+                offspring.vehicle_route = vr;
+            end
         end
     end
 end
@@ -2245,68 +2247,114 @@ if rand() < 0.3
     end
 end
 
-% 2c. 服务节点调整 (概率0.4新增, 0.4删除)
+% 2c. 服务节点调整 (概率0.4新增, 0.4删除) —— 独立概率,可同时触发
 if rand() < 0.4
-    % 新增节点
-    if ~isempty(offspring.drone_A_tasks) || ~isempty(offspring.drone_B_tasks)
-        % 找一个未服务的节点
-        drone_served = [];
-        for k = 1:size(offspring.drone_A_tasks, 1)
-            s = offspring.drone_A_tasks{k,2};
-            if iscell(s), s = cell2mat(s); end
-            drone_served = [drone_served, s];
+    % 新增节点 —— 支持A/B型无人机
+    % 找一个未服务的节点
+    drone_served = [];
+    for k = 1:size(offspring.drone_A_tasks, 1)
+        s = offspring.drone_A_tasks{k,2};
+        if iscell(s)
+            if isempty(s), s = []; else, s = cell2mat(s); end
         end
-        for k = 1:size(offspring.drone_B_tasks, 1)
-            s = offspring.drone_B_tasks{k,2};
-            if iscell(s), s = cell2mat(s); end
-            drone_served = [drone_served, s];
+        drone_served = [drone_served, s];
+    end
+    for k = 1:size(offspring.drone_B_tasks, 1)
+        s = offspring.drone_B_tasks{k,2};
+        if iscell(s)
+            if isempty(s), s = []; else, s = cell2mat(s); end
         end
+        drone_served = [drone_served, s];
+    end
 
-        vehicle_served = offspring.vehicle_route(2:end-1);
-        unserved = setdiff(2:n_nodes, [drone_served, vehicle_served]);
+    vehicle_served = offspring.vehicle_route(2:end-1);
+    unserved = setdiff(2:n_nodes, [drone_served, vehicle_served]);
 
-        if ~isempty(unserved) && ~isempty(offspring.drone_B_tasks)
-            new_node = unserved(randi(length(unserved)));
-            k_task = randi(size(offspring.drone_B_tasks, 1));
-            s = offspring.drone_B_tasks{k_task, 2};
-            if iscell(s), s = cell2mat(s); end
-            s_new = [s, new_node];
+    % 收集有任务的无人机类型
+    avail_types = {};
+    if ~isempty(offspring.drone_A_tasks), avail_types{end+1} = 'A'; end
+    if ~isempty(offspring.drone_B_tasks), avail_types{end+1} = 'B'; end
 
-            launch = offspring.drone_B_tasks{k_task, 1};
-            recovery = offspring.drone_B_tasks{k_task, 3};
-            flight_dist = dist_matrix(launch, s_new(1)) + dist_matrix(s_new(end), recovery);
-            for si = 1:length(s_new)-1
-                flight_dist = flight_dist + dist_matrix(s_new(si), s_new(si+1));
-            end
+    if ~isempty(unserved) && ~isempty(avail_types)
+        new_node = unserved(randi(length(unserved)));
+        drone_type = avail_types{randi(length(avail_types))};
 
-            if sum(demands(s_new)) <= W_B && flight_dist <= U_B
-                offspring.drone_B_tasks{k_task, 2} = s_new;
-            end
+        switch drone_type
+            case 'A'
+                k_task = randi(size(offspring.drone_A_tasks, 1));
+                s = offspring.drone_A_tasks{k_task, 2};
+                if iscell(s)
+                    if isempty(s), s = []; else, s = cell2mat(s); end
+                end
+                s_new = [s, new_node];
+
+                launch = offspring.drone_A_tasks{k_task, 1};
+                recovery = offspring.drone_A_tasks{k_task, 3};
+                flight_dist = dist_matrix(launch, s_new(1)) + dist_matrix(s_new(end), recovery);
+                for si = 1:length(s_new)-1
+                    flight_dist = flight_dist + dist_matrix(s_new(si), s_new(si+1));
+                end
+
+                if sum(demands(s_new)) <= W_A && flight_dist <= U_A
+                    offspring.drone_A_tasks{k_task, 2} = s_new;
+                end
+            case 'B'
+                k_task = randi(size(offspring.drone_B_tasks, 1));
+                s = offspring.drone_B_tasks{k_task, 2};
+                if iscell(s)
+                    if isempty(s), s = []; else, s = cell2mat(s); end
+                end
+                s_new = [s, new_node];
+
+                launch = offspring.drone_B_tasks{k_task, 1};
+                recovery = offspring.drone_B_tasks{k_task, 3};
+                flight_dist = dist_matrix(launch, s_new(1)) + dist_matrix(s_new(end), recovery);
+                for si = 1:length(s_new)-1
+                    flight_dist = flight_dist + dist_matrix(s_new(si), s_new(si+1));
+                end
+
+                if sum(demands(s_new)) <= W_B && flight_dist <= U_B
+                    offspring.drone_B_tasks{k_task, 2} = s_new;
+                end
         end
     end
-elseif rand() < 0.4
-    % 删除最远节点
-    if ~isempty(offspring.drone_A_tasks)
-        k = randi(size(offspring.drone_A_tasks, 1));
-        s = offspring.drone_A_tasks{k,2};
-        if iscell(s), s = cell2mat(s); end
-        if length(s) > 1
-            launch = offspring.drone_A_tasks{k,1};
-            dists = dist_matrix(launch, s);
-            [~, idx_remove] = max(dists);
-            s(idx_remove) = [];
-            offspring.drone_A_tasks{k,2} = s;
-        end
-    elseif ~isempty(offspring.drone_B_tasks)
-        k = randi(size(offspring.drone_B_tasks, 1));
-        s = offspring.drone_B_tasks{k,2};
-        if iscell(s), s = cell2mat(s); end
-        if length(s) > 1
-            launch = offspring.drone_B_tasks{k,1};
-            dists = dist_matrix(launch, s);
-            [~, idx_remove] = max(dists);
-            s(idx_remove) = [];
-            offspring.drone_B_tasks{k,2} = s;
+end
+if rand() < 0.4
+    % 删除载重/距离比最大的节点 —— 支持A/B型
+    avail_types_del = {};
+    if ~isempty(offspring.drone_A_tasks), avail_types_del{end+1} = 'A'; end
+    if ~isempty(offspring.drone_B_tasks), avail_types_del{end+1} = 'B'; end
+    if ~isempty(avail_types_del)
+        drone_type = avail_types_del{randi(length(avail_types_del))};
+        switch drone_type
+            case 'A'
+                k = randi(size(offspring.drone_A_tasks, 1));
+                s = offspring.drone_A_tasks{k,2};
+                if iscell(s)
+                    if isempty(s), s = []; else, s = cell2mat(s); end
+                end
+                if length(s) > 1
+                    launch = offspring.drone_A_tasks{k,1};
+                    dists = dist_matrix(launch, s);
+                    ratio = demands(s) ./ max(dists, 1e-6);
+                    [~, idx_remove] = max(ratio);
+                    s(idx_remove) = [];
+                    offspring.drone_A_tasks{k,2} = s;
+                end
+            case 'B'
+                k = randi(size(offspring.drone_B_tasks, 1));
+                s = offspring.drone_B_tasks{k,2};
+                if iscell(s)
+                    if isempty(s), s = []; else, s = cell2mat(s); end
+                end
+                if length(s) > 1
+                    launch = offspring.drone_B_tasks{k,1};
+                    dists = dist_matrix(launch, s);
+                    ratio = demands(s) ./ max(dists, 1e-6);
+                    [~, idx_remove] = max(ratio);
+                    s(idx_remove) = [];
+                    offspring.drone_B_tasks{k,2} = s;
+                end
         end
     end
 end
@@ -2323,7 +2371,7 @@ function offspring = process_offspring(offspring, Pm, parent, demands, dist_matr
 % 变异操作 (按概率Pm触发)
 if rand() < Pm
     offspring = constraint_aware_mutation(offspring, demands, dist_matrix, ...
-        V_A, V_B, W_A, W_B, U_A, U_B, n_nodes, warehouse);
+        V_A, V_B, W_A, W_B, U_A, U_B, n_nodes, warehouse, Pm);
 end
 
 % 完整性校验与修复
