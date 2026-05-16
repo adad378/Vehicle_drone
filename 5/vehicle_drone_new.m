@@ -40,7 +40,7 @@ alpha = 0.2;            % 交叉概率调整权重
 fprintf('============================================\n\n');
 
 %% 获取算例数据
-[coords, demands, case_name] = get_crood_data('b1');
+[coords, demands, case_name] = get_crood_data('a1');
 n_nodes = size(coords, 1);
 warehouse = 1;
 
