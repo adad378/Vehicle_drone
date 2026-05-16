@@ -40,7 +40,7 @@ alpha = 0.2;            % 交叉概率调整权重
 fprintf('============================================\n\n');
 
 %% 获取算例数据
-[coords, demands, case_name] = get_crood_data('c1');
+[coords, demands, case_name] = get_crood_data('b1');
 n_nodes = size(coords, 1);
 warehouse = 1;
 
@@ -752,6 +752,10 @@ warehouse = vehicle_route(1);
 drone_A_tasks = {};
 drone_B_tasks = {};
 
+% 单架约束：跟踪同类型上次回收点（0=尚未发射过，不受约束）
+last_recovery_A = 0;
+last_recovery_B = 0;
+
 vehicle_inner = vehicle_route(2:end-1);
 n_inner = length(vehicle_inner);
 
@@ -801,13 +805,19 @@ while idx <= n_inner
             [assigned, drone_A_tasks, is_drone_served, is_locked, new_idx] = ...
                 try_assign_drone_task_random('A', node, idx, vehicle_inner, n_inner, ...
                 demands, dist_matrix, warehouse, W_A, U_A, ...
-                drone_A_tasks, is_drone_served, is_locked);
+                drone_A_tasks, is_drone_served, is_locked, last_recovery_A);
+            if assigned && ~isempty(drone_A_tasks)
+                last_recovery_A = drone_A_tasks{end, 3};
+            end
         else
             % 尝试B型无人机 (顺序遍历服务节点, 与贪婪相同)
             [assigned, drone_B_tasks, is_drone_served, is_locked, new_idx] = ...
                 try_assign_drone_task_random('B', node, idx, vehicle_inner, n_inner, ...
                 demands, dist_matrix, warehouse, W_B, U_B, ...
-                drone_B_tasks, is_drone_served, is_locked);
+                drone_B_tasks, is_drone_served, is_locked, last_recovery_B);
+            if assigned && ~isempty(drone_B_tasks)
+                last_recovery_B = drone_B_tasks{end, 3};
+            end
         end
         if assigned
             idx = new_idx;
@@ -847,11 +857,12 @@ function [drone_A_tasks, drone_B_tasks, vehicle_route] = ...
 
 warehouse = vehicle_route(1);
 
-MAX_A_ROUNDS = 20;   % A型无人机轮次上限
-MAX_B_ROUNDS = 15;   % B型无人机轮次上限
-
 drone_A_tasks = {};
 drone_B_tasks = {};
+
+% 单架约束：跟踪同类型上次回收点（0=尚未发射过，不受约束）
+last_recovery_A = 0;
+last_recovery_B = 0;
 
 vehicle_inner = vehicle_route(2:end-1);
 n_inner = length(vehicle_inner);
@@ -882,25 +893,32 @@ while idx <= n_inner
 
     assigned = false;
 
-    % ----- 优先尝试A型无人机 -----
-    if can_A && size(drone_A_tasks, 1) < MAX_A_ROUNDS
+    % ----- 优先尝试A型无人机（无轮次上限，由 find_launch_recovery 约束单架顺序）-----
+    if can_A
         [assigned, drone_A_tasks, is_drone_served, is_locked, new_idx] = ...
             try_assign_drone_task('A', node, idx, vehicle_inner, n_inner, ...
             demands, dist_matrix, warehouse, W_A, U_A, ...
-            drone_A_tasks, is_drone_served, is_locked);
+            drone_A_tasks, is_drone_served, is_locked, last_recovery_A);
         if assigned
+            % 更新上次回收点（取最新回收点的 vehicle_inner 位置判断依据，用回收节点值）
+            if ~isempty(drone_A_tasks)
+                last_recovery_A = drone_A_tasks{end, 3};
+            end
             idx = new_idx;
             continue;
         end
     end
 
-    % ----- A不行, 尝试B型无人机 -----
-    if ~assigned && can_B && size(drone_B_tasks, 1) < MAX_B_ROUNDS
+    % ----- A不行, 尝试B型无人机（无轮次上限，由 find_launch_recovery 约束单架顺序）-----
+    if ~assigned && can_B
         [assigned, drone_B_tasks, is_drone_served, is_locked, new_idx] = ...
             try_assign_drone_task('B', node, idx, vehicle_inner, n_inner, ...
             demands, dist_matrix, warehouse, W_B, U_B, ...
-            drone_B_tasks, is_drone_served, is_locked);
+            drone_B_tasks, is_drone_served, is_locked, last_recovery_B);
         if assigned
+            if ~isempty(drone_B_tasks)
+                last_recovery_B = drone_B_tasks{end, 3};
+            end
             idx = new_idx;
             continue;
         end
@@ -931,10 +949,11 @@ vehicle_route = [warehouse, vehicle_inner, warehouse];
 end
 
 %% 尝试分配无人机任务 (辅助函数: 先加节点→找发射回收→续航检测→不满足则减节点→再续航检测)
+% 新增参数 last_recovery_node: 同类型无人机上一次回收点(0表示首次)
 function [assigned, drone_tasks, is_drone_served, is_locked, new_idx] = ...
     try_assign_drone_task(drone_type, start_node, start_idx, vehicle_inner, n_inner, ...
     demands, dist_matrix, warehouse, capacity, max_range, ...
-    drone_tasks, is_drone_served, is_locked)
+    drone_tasks, is_drone_served, is_locked, last_recovery_node)
 
 assigned = false;
 new_idx = start_idx;
@@ -962,7 +981,7 @@ end
 % ----- 步骤2: 为多节点服务列表找最优发射/回收点 -----
 [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
-    is_drone_served, warehouse, dist_matrix);
+    is_drone_served, warehouse, dist_matrix, last_recovery_node);
 
 if best_launch == 0 || best_recovery == 0
     return;
@@ -976,7 +995,7 @@ if min_flight_dist > max_range && length(service_nodes) > 1
 
     [best_launch, best_recovery, min_flight_dist] = ...
         find_launch_recovery(service_nodes, vehicle_inner, ...
-        is_drone_served, warehouse, dist_matrix);
+        is_drone_served, warehouse, dist_matrix, last_recovery_node);
 
     if best_launch == 0 || best_recovery == 0
         return;
@@ -1022,30 +1041,93 @@ if ~isempty(service_nodes)
 end
 end
 
-%% 为服务节点找最优发射/回收点 (候选集: 仓库 + 未服务非自身节点 + 仓库)
+%% 为服务节点找最优发射/回收点
+% 新增参数 last_recovery_node: 同类型无人机上一次回收点(0表示首次发射无约束)
+% 约束: 发射候选必须在 service_nodes[1] 之前的车辆路径位置上,
+%       且必须在 last_recovery_node 之后(同类型回收后才能再发射);
+%       回收候选必须在 service_nodes[end] 之后的车辆路径位置上。
 function [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
-    is_drone_served, warehouse, dist_matrix)
+    is_drone_served, warehouse, dist_matrix, last_recovery_node)
 
-remaining = vehicle_inner(~is_drone_served);
-for s = 1:length(service_nodes)
-    remaining = remaining(remaining ~= service_nodes(s));
+n_inner = length(vehicle_inner);
+
+% 查找服务节点在 vehicle_inner 中的位置
+first_sv_pos = find(vehicle_inner == service_nodes(1), 1);
+last_sv_pos  = find(vehicle_inner == service_nodes(end), 1);
+
+% 查找 last_recovery_node 在 vehicle_inner 中的位置
+if last_recovery_node == 0 || last_recovery_node == warehouse
+    last_rec_pos = 0;
+else
+    last_rec_pos = find(vehicle_inner == last_recovery_node, 1);
+    if isempty(last_rec_pos)
+        last_rec_pos = 0;  % 未找到则按0处理(可能在之前被锁定移除了)
+    end
 end
-candidates = [warehouse, remaining, warehouse];
+
+% 构建发射候选集: 从上一个同类型回收点之后开始遍历(AB分开)
+% 若无上一个回收点(即该类型无人机首次配送), 则仓库是发射候选, 从位置1开始遍历
+% 若有上一个回收点, 则仓库不参与, 从回收点之后开始遍历
+launch_candidates = [];
+
+if ~isempty(first_sv_pos)
+    if last_rec_pos > 0
+        % 有上一个同类型回收点, 仓库不参与, 从回收点之后开始遍历
+        start_pos = last_rec_pos + 1;
+    else
+        % 无上一个回收点, 仓库作为发射候选, 从位置1(仓库之后)开始遍历
+        launch_candidates = [launch_candidates, warehouse];
+        start_pos = 1;
+    end
+    for pos = start_pos:(first_sv_pos - 1)
+        node = vehicle_inner(pos);
+        if ~is_drone_served(pos)
+            % 排除自身是服务节点的情况
+            if ~ismember(node, service_nodes)
+                launch_candidates = [launch_candidates, node];
+            end
+        end
+    end
+end
+
+% 构建回收候选集: 仓库(始终候选) + vehicle_inner中位于 last_sv_pos 之后的未被服务节点
+recovery_candidates = [];
+recovery_candidates = [recovery_candidates, warehouse];
+
+if ~isempty(last_sv_pos)
+    for posv = (last_sv_pos + 1):n_inner
+        node = vehicle_inner(posv);
+        if ~is_drone_served(posv)
+            if ~ismember(node, service_nodes)
+                recovery_candidates = [recovery_candidates, node];
+            end
+        end
+    end
+end
 
 best_launch = 0;
 best_recovery = 0;
 min_flight_dist = inf;
 
-n_cand = length(candidates);
-for li = 1:n_cand
-    for ri = 1:n_cand
+n_launch = length(launch_candidates);
+n_recov  = length(recovery_candidates);
+
+for li = 1:n_launch
+    for ri = 1:n_recov
+        launch_cand = launch_candidates(li);
+        recovery_cand = recovery_candidates(ri);
+
         % 发射和回收不能是同一个非仓库节点
-        if li == ri && candidates(li) ~= warehouse
+        if launch_cand == recovery_cand && launch_cand ~= warehouse
             continue;
         end
-        launch_cand = candidates(li);
-        recovery_cand = candidates(ri);
+
+        % 额外验证: 发射位置 < 回收位置(按车辆行驶方向), 
+        %   且发射位置 < 第一个服务点位置, 回收位置 > 最后一个服务点位置
+        if launch_cand == warehouse && recovery_cand == warehouse
+            % 都从仓库出发回收也允许
+        end
 
         % 飞行距离: 发射→服务点1→...→服务点n→回收
         flight_dist = dist_matrix(launch_cand, service_nodes(1));
@@ -1064,10 +1146,11 @@ end
 end
 
 %% 尝试分配无人机任务 (随机版, 与贪婪版唯一区别: 尝试的顺序遍历拼接, 无轮次上限)
+% 新增参数 last_recovery_node: 同类型无人机上一次回收点(0表示首次)
 function [assigned, drone_tasks, is_drone_served, is_locked, new_idx] = ...
     try_assign_drone_task_random(drone_type, start_node, start_idx, vehicle_inner, n_inner, ...
     demands, dist_matrix, warehouse, capacity, max_range, ...
-    drone_tasks, is_drone_served, is_locked)
+    drone_tasks, is_drone_served, is_locked, last_recovery_node)
 
 assigned = false;
 new_idx = start_idx;
@@ -1095,7 +1178,7 @@ end
 % ----- 步骤2: 为多节点服务列表找最优发射/回收点 -----
 [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
-    is_drone_served, warehouse, dist_matrix);
+    is_drone_served, warehouse, dist_matrix, last_recovery_node);
 
 if best_launch == 0 || best_recovery == 0
     return;
@@ -1108,7 +1191,7 @@ if min_flight_dist > max_range && length(service_nodes) > 1
 
     [best_launch, best_recovery, min_flight_dist] = ...
         find_launch_recovery(service_nodes, vehicle_inner, ...
-        is_drone_served, warehouse, dist_matrix);
+        is_drone_served, warehouse, dist_matrix, last_recovery_node);
 
     if best_launch == 0 || best_recovery == 0
         return;
