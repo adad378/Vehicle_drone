@@ -1,28 +1,24 @@
-%% ===========================================================================
-% 改进自适应遗传算法 (AGA-CO) 求解 VHD-TSP 问题
-% 基于第五章算法描述
-% 算例: c1, c2, c3
-% ===========================================================================
+%% 改进自适应遗传算法 (AGA-CO) 求解 VHD-TSP 问题
 
 clc; clear; close all;
 
 %% ==================== 全局参数设置 ====================
 % --- 车辆参数 ---
 V_T = 50;           % 车辆速度 (km/h)
-service_T = 0.05;   % 车辆在每个投放点的服务时间 (小时), 约3分钟
+service_T = 0;   % 车辆在每个投放点的服务时间 (小时), 约3分钟
 
 % --- 异构无人机参数 ---
 % 无人机A (重型长续航)
 V_A = V_T * 0.8;  % 无人机A速度 = 40 km/h
 W_A = 40;           % 无人机A载重能力 (kg)
 U_A = 120;          % 无人机A续航里程 (km)
-service_D_A = 0.03; % 无人机A服务时间 (小时)
+service_D_A = 0; % 无人机A服务时间 (小时)
 
 % 无人机B (轻型短途快速)
 V_B = V_T * 1.2;  % 无人机B速度 = 60 km/h
 W_B = 20;           % 无人机B载重能力 (kg)
 U_B = 80;           % 无人机B续航里程 (km)
-service_D_B = 0.02; % 无人机B服务时间 (小时)
+service_D_B = 0; % 无人机B服务时间 (小时)
 
 % --- 协同约束 ---
 At_max = 5 / 60;    % 最大相互等待时间 (小时) = 5分钟
@@ -36,6 +32,7 @@ tournament_k = 5;       % 锦标赛选择规模
 elite_count = 2;        % 精英保留数量
 Pc_max = 0.8;           % 最大交叉概率
 alpha = 0.2;            % 交叉概率调整权重
+min_util = 0.8;         % 车辆节点最低利用率阈值 (50%)
 
 fprintf('============================================\n\n');
 
@@ -57,7 +54,7 @@ end
     AGA_CO(coords, demands, dist_matrix, n_nodes, warehouse, ...
     V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
     service_D_A, service_D_B, At_max, M, pop_size, max_gen, ...
-    stall_limit, tournament_k, elite_count, Pc_max, alpha);
+    stall_limit, tournament_k, elite_count, Pc_max, alpha, min_util);
 
 % 解码最优解
 [vehicle_route, drone_tasks_A, drone_tasks_B, total_time, details] = ...
@@ -155,13 +152,13 @@ function [best_chromosome, best_fitness, fitness_history, run_time] = ...
     AGA_CO(coords, demands, dist_matrix, n_nodes, warehouse, ...
     V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
     service_D_A, service_D_B, At_max, M, pop_size, max_gen, ...
-    stall_limit, tournament_k, elite_count, Pc_max, alpha)
+    stall_limit, tournament_k, elite_count, Pc_max, alpha, min_util)
 
 tic;
 
 % 初始化种群
 population = initialize_population(pop_size, n_nodes, warehouse, coords, ...
-    demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
+    demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B, min_util);
 
 % 适应度评估
 fitness = zeros(pop_size, 1);
@@ -355,43 +352,107 @@ end
 
 %%种群初始化
 function population = initialize_population(pop_size, n_nodes, warehouse, coords, ...
-    demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B)
+    demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B, min_util)
 
-population = cell(pop_size, 1);%创建一个cell数组来存储种群中的每个个体（染色体）。每个染色体将包含车辆路径和无人机任务分配的信息。
+fprintf('\n========== 开始初始化种群 (min_util=%.0f%%) ==========\n', min_util*100);
 
-%%测试:绘制随机种群初始化的第一份路径图
+MAX_RETRIES = 100;  % 单个个体最多重新生成100次
+
+population = cell(pop_size, 1);
+
+greedy_count = 0;
+random_count = 0;
+retry_total = 0;
+
 greedy_drawn = false;
 random_drawn = false;
+
 for i = 1:pop_size
-    if i <= pop_size / 2
-        % 50% 贪婪生成
-        chromosome = generate_greedy_chromosome(n_nodes, warehouse, demands, ...
-            dist_matrix, W_A, W_B, U_A, U_B, coords);
-        % 对第一个随机个体绘制路径图
-        if ~greedy_drawn
-            plot_greedy_path(coords, chromosome.vehicle_route, ...
-                chromosome.drone_A_tasks, chromosome.drone_B_tasks, ...
-                '贪婪生成第1份路径',1);
-            greedy_drawn = true;
+    retry = 0;
+    while true
+        if i <= pop_size / 2
+            chromosome = generate_greedy_chromosome(n_nodes, warehouse, demands, ...
+                dist_matrix, W_A, W_B, U_A, U_B, coords);
+            if ~greedy_drawn && retry == 0
+                plot_greedy_path(coords, chromosome.vehicle_route, ...
+                    chromosome.drone_A_tasks, chromosome.drone_B_tasks, ...
+                    '贪婪生成第1份路径', 1);
+                greedy_drawn = true;
+            end
+            greedy_count = greedy_count + 1;
+        else
+            chromosome = generate_random_chromosome(n_nodes, warehouse, coords, ...
+                demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
+            if ~random_drawn && retry == 0
+                plot_greedy_path(coords, chromosome.vehicle_route, ...
+                    chromosome.drone_A_tasks, chromosome.drone_B_tasks, ...
+                    '随机生成第1份路径', 2);
+                random_drawn = true;
+            end
+            random_count = random_count + 1;
         end
-    else
-        % 50% 随机生成
-        chromosome = generate_random_chromosome(n_nodes, warehouse, coords, ...
+
+        chromosome = validate_and_repair(chromosome, n_nodes, warehouse, ...
             demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
-        if ~random_drawn
-            plot_greedy_path(coords, chromosome.vehicle_route, ...
-                chromosome.drone_A_tasks, chromosome.drone_B_tasks, ...
-                '随机生成第1份路径',2);
-            random_drawn = true;
+
+        % ===== 车辆节点利用率校验 =====
+        [util_ok, util_value] = check_vehicle_node_utilization(chromosome, ...
+            n_nodes, warehouse, min_util);
+
+        if util_ok
+            break;
+        end
+
+        retry = retry + 1;
+        retry_total = retry_total + 1;
+
+        if retry >= MAX_RETRIES
+            fprintf('  [利用率] 个体%d 连续%d次不达标(%.1f%%), 接受当前个体\n', ...
+                i, MAX_RETRIES, util_value * 100);
+            break;
         end
     end
 
-    % 完整性校验和修复
-    chromosome = validate_and_repair(chromosome, n_nodes, warehouse, ...
-        demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B);
-
     population{i} = chromosome;
 end
+
+fprintf('========== 种群初始化完成 ==========\n');
+fprintf('  生成统计: 贪婪%d次, 随机%d次, 重生成%d次\n', ...
+    greedy_count, random_count, retry_total);
+fprintf('  最低利用率阈值: %.0f%%\n\n', min_util*100);
+end
+
+%% 车辆节点利用率校验
+function [ok, util] = check_vehicle_node_utilization(chromosome, n_nodes, ...
+    warehouse, min_util)
+
+% 收集所有无人机发射/回收点
+drone_nodes = [];
+
+for k = 1:size(chromosome.drone_A_tasks, 1)
+    drone_nodes = [drone_nodes, chromosome.drone_A_tasks{k,1}];
+    drone_nodes = [drone_nodes, chromosome.drone_A_tasks{k,3}];
+end
+
+for k = 1:size(chromosome.drone_B_tasks, 1)
+    drone_nodes = [drone_nodes, chromosome.drone_B_tasks{k,1}];
+    drone_nodes = [drone_nodes, chromosome.drone_B_tasks{k,3}];
+end
+
+drone_nodes = unique(drone_nodes);
+
+vr_inner = chromosome.vehicle_route(2:end-1);
+n_vehicle = length(vr_inner);
+
+if n_vehicle == 0
+    util = 1.0;
+    ok = true;
+    return;
+end
+
+used_count = sum(ismember(vr_inner, drone_nodes));
+util = used_count / n_vehicle;
+ok = (util >= min_util);
 end
 
 %%贪婪染色体生成
@@ -734,14 +795,12 @@ end
 vehicle_inner = [vehicle_inner(1:insert_idx-1), node, vehicle_inner(insert_idx:end)];
 end
 
-%% ===========================================================================
-%%       全随机无人机任务分配 (初始种群生成专用)
-%% ===========================================================================
+%% 随机无人机任务分配
 % 算法思路: 采用与贪婪分配相同的结构化流程, 区别在于:
-%   1. 随机选择A/B机型的尝试顺序
-%   2. 无轮次上限
-%   3. 服务节点拼接方式与贪婪相同（顺序遍历下一个）
-%   4. 其余流程 (找最优发射回收点、续航检测、回退) 不变
+% 随机选择A/B机型的尝试顺序
+% 无轮次上限
+% 服务节点拼接方式与贪婪相同（顺序遍历下一个）
+% 其余流程 (找最优发射回收点、续航检测、回退) 不变
 % ===========================================================================
 function [drone_A_tasks, drone_B_tasks, vehicle_route] = ...
     random_drone_assignment(vehicle_route, demands, dist_matrix, ...
@@ -785,7 +844,7 @@ while idx <= n_inner
 
     assigned = false;
 
-    % ----- 随机决定A和B的尝试顺序 -----
+    % 随机决定A和B的尝试顺序
     drone_order = [];
     if can_A
         drone_order = [drone_order, 1];  % 1代表A
@@ -850,7 +909,7 @@ end
 vehicle_route = [warehouse, vehicle_inner, warehouse];
 end
 
-%%贪婪无人机任务分配（多节点拼接版 - 优先A后B）
+%% 贪婪无人机任务分配（多节点拼接，优先A后B）
 function [drone_A_tasks, drone_B_tasks, vehicle_route] = ...
     greedy_drone_assignment(vehicle_route, demands, dist_matrix, ...
     W_A, W_B, U_A, U_B)
@@ -893,8 +952,8 @@ while idx <= n_inner
 
     assigned = false;
 
-    % ----- 优先尝试A型无人机（无轮次上限，由 find_launch_recovery 约束单架顺序）-----
-    if can_A
+    % ----- 优先尝试A型无人机（轮次上限20）-----
+    if can_A && size(drone_A_tasks, 1) < 20
         [assigned, drone_A_tasks, is_drone_served, is_locked, new_idx] = ...
             try_assign_drone_task('A', node, idx, vehicle_inner, n_inner, ...
             demands, dist_matrix, warehouse, W_A, U_A, ...
@@ -909,8 +968,8 @@ while idx <= n_inner
         end
     end
 
-    % ----- A不行, 尝试B型无人机（无轮次上限，由 find_launch_recovery 约束单架顺序）-----
-    if ~assigned && can_B
+    % ----- A不行, 尝试B型无人机（轮次上限15）-----
+    if ~assigned && can_B && size(drone_B_tasks, 1) < 15
         [assigned, drone_B_tasks, is_drone_served, is_locked, new_idx] = ...
             try_assign_drone_task('B', node, idx, vehicle_inner, n_inner, ...
             demands, dist_matrix, warehouse, W_B, U_B, ...
@@ -949,7 +1008,6 @@ vehicle_route = [warehouse, vehicle_inner, warehouse];
 end
 
 %% 尝试分配无人机任务 (辅助函数: 先加节点→找发射回收→续航检测→不满足则减节点→再续航检测)
-% 新增参数 last_recovery_node: 同类型无人机上一次回收点(0表示首次)
 function [assigned, drone_tasks, is_drone_served, is_locked, new_idx] = ...
     try_assign_drone_task(drone_type, start_node, start_idx, vehicle_inner, n_inner, ...
     demands, dist_matrix, warehouse, capacity, max_range, ...
@@ -958,7 +1016,7 @@ function [assigned, drone_tasks, is_drone_served, is_locked, new_idx] = ...
 assigned = false;
 new_idx = start_idx;
 
-% ----- 步骤1: 拼接服务节点, 只要载重满足就一直加 -----
+%拼接服务节点, 只要载重满足就一直加
 service_nodes = [start_node];
 cumulative_demand = demands(start_node);
 
@@ -978,36 +1036,29 @@ while next_idx <= n_inner
     end
 end
 
-% ----- 步骤2: 为多节点服务列表找最优发射/回收点 -----
+%为多节点服务列表找最优发射/回收点
 [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
     is_drone_served, warehouse, dist_matrix, last_recovery_node);
 
-if best_launch == 0 || best_recovery == 0
-    return;
-end
-
-% ----- 步骤3: 续航检测, 不满足则去掉添加的节点, 回退到单节点再检测 -----
-if min_flight_dist > max_range && length(service_nodes) > 1
-    % 去掉添加的后续节点, 只保留第一个服务点
-    service_nodes = start_node;
-    cumulative_demand = demands(start_node);
+%找不到发射/回收点或不满足续航, 逐个退掉末尾服务节点
+while (best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range) ...
+        && length(service_nodes) > 1
+    removed = service_nodes(end);
+    service_nodes(end) = [];
+    cumulative_demand = cumulative_demand - demands(removed);
 
     [best_launch, best_recovery, min_flight_dist] = ...
         find_launch_recovery(service_nodes, vehicle_inner, ...
         is_drone_served, warehouse, dist_matrix, last_recovery_node);
-
-    if best_launch == 0 || best_recovery == 0
-        return;
-    end
 end
 
-% 单节点仍不满足续航 → 放弃
-if min_flight_dist > max_range
+% 退到单节点仍找不到发射/回收点或不满足续航 → 放弃
+if best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range
     return;
 end
 
-% ----- 步骤4: 分配成功 -----
+%分配成功
 if ~isempty(service_nodes)
     drone_tasks{end+1, 1} = best_launch;
     drone_tasks{end, 2} = service_nodes;
@@ -1042,10 +1093,6 @@ end
 end
 
 %% 为服务节点找最优发射/回收点
-% 新增参数 last_recovery_node: 同类型无人机上一次回收点(0表示首次发射无约束)
-% 约束: 发射候选必须在 service_nodes[1] 之前的车辆路径位置上,
-%       且必须在 last_recovery_node 之后(同类型回收后才能再发射);
-%       回收候选必须在 service_nodes[end] 之后的车辆路径位置上。
 function [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
     is_drone_served, warehouse, dist_matrix, last_recovery_node)
@@ -1066,42 +1113,48 @@ else
     end
 end
 
-% 构建发射候选集: 从上一个同类型回收点之后开始遍历(AB分开)
-% 若无上一个回收点(即该类型无人机首次配送), 则仓库是发射候选, 从位置1开始遍历
+% 构建发射候选集: 从上一个同类型回收点之后到车辆路径末尾
+% 发射点不限于第一个服务节点之前，可以在任意位置，只需在回收点之前
+% 若无上一个回收点(即该类型无人机首次配送), 则仓库是发射候选
 % 若有上一个回收点, 则仓库不参与, 从回收点之后开始遍历
 launch_candidates = [];
+launch_positions = [];  % 记录每个候选在vehicle_inner中的位置(仓库位置为0)
 
-if ~isempty(first_sv_pos)
-    if last_rec_pos > 0
-        % 有上一个同类型回收点, 仓库不参与, 从回收点之后开始遍历
-        start_pos = last_rec_pos + 1;
-    else
-        % 无上一个回收点, 仓库作为发射候选, 从位置1(仓库之后)开始遍历
-        launch_candidates = [launch_candidates, warehouse];
-        start_pos = 1;
-    end
-    for pos = start_pos:(first_sv_pos - 1)
-        node = vehicle_inner(pos);
-        if ~is_drone_served(pos)
-            % 排除自身是服务节点的情况
-            if ~ismember(node, service_nodes)
-                launch_candidates = [launch_candidates, node];
-            end
+if last_rec_pos > 0
+    % 有上一个同类型回收点, 仓库不参与, 从回收点之后开始遍历
+    start_pos = last_rec_pos + 1;
+else
+    % 无上一个回收点, 仓库作为发射候选, 从位置1(仓库之后)开始遍历
+    launch_candidates = [launch_candidates, warehouse];
+    launch_positions = [launch_positions, 0];
+    start_pos = 1;
+end
+
+for pos = start_pos:n_inner
+    node = vehicle_inner(pos);
+    if ~is_drone_served(pos)
+        % 排除自身是服务节点的情况
+        if ~ismember(node, service_nodes)
+            launch_candidates = [launch_candidates, node];
+            launch_positions = [launch_positions, pos];
         end
     end
 end
 
-% 构建回收候选集: 仓库(始终候选) + vehicle_inner中位于 last_sv_pos 之后的未被服务节点
+% 构建回收候选集: 仓库(始终候选) + vehicle_inner中所有未被服务的非服务节点
+% 回收点不限于最后一个服务节点之后，可以在任意位置，只需在发射点之后
 recovery_candidates = [];
-recovery_candidates = [recovery_candidates, warehouse];
+recovery_positions = [];  % 记录每个候选在vehicle_inner中的位置(仓库位置为n_inner+1)
 
-if ~isempty(last_sv_pos)
-    for posv = (last_sv_pos + 1):n_inner
-        node = vehicle_inner(posv);
-        if ~is_drone_served(posv)
-            if ~ismember(node, service_nodes)
-                recovery_candidates = [recovery_candidates, node];
-            end
+recovery_candidates = [recovery_candidates, warehouse];
+recovery_positions = [recovery_positions, n_inner + 1];
+
+for posv = 1:n_inner
+    node = vehicle_inner(posv);
+    if ~is_drone_served(posv)
+        if ~ismember(node, service_nodes)
+            recovery_candidates = [recovery_candidates, node];
+            recovery_positions = [recovery_positions, posv];
         end
     end
 end
@@ -1114,19 +1167,20 @@ n_launch = length(launch_candidates);
 n_recov  = length(recovery_candidates);
 
 for li = 1:n_launch
+    launch_cand = launch_candidates(li);
+    launch_pos = launch_positions(li);
     for ri = 1:n_recov
-        launch_cand = launch_candidates(li);
         recovery_cand = recovery_candidates(ri);
+        recovery_pos = recovery_positions(ri);
 
         % 发射和回收不能是同一个非仓库节点
-        if launch_cand == recovery_cand && launch_cand ~= warehouse
+        if launch_cand == recovery_cand
             continue;
         end
 
-        % 额外验证: 发射位置 < 回收位置(按车辆行驶方向), 
-        %   且发射位置 < 第一个服务点位置, 回收位置 > 最后一个服务点位置
-        if launch_cand == warehouse && recovery_cand == warehouse
-            % 都从仓库出发回收也允许
+        % 验证: 发射位置 < 回收位置(按车辆行驶方向)
+        if launch_pos >= recovery_pos
+            continue;
         end
 
         % 飞行距离: 发射→服务点1→...→服务点n→回收
@@ -1155,7 +1209,7 @@ function [assigned, drone_tasks, is_drone_served, is_locked, new_idx] = ...
 assigned = false;
 new_idx = start_idx;
 
-% ----- 步骤1: 顺序拼接服务节点, 只要载重满足就一直加 (与贪婪相同) -----
+%顺序拼接服务节点, 只要载重满足就一直加 (与贪婪相同)
 service_nodes = [start_node];
 cumulative_demand = demands(start_node);
 
@@ -1175,35 +1229,28 @@ while next_idx <= n_inner
     end
 end
 
-% ----- 步骤2: 为多节点服务列表找最优发射/回收点 -----
+%为多节点服务列表找最优发射/回收点, 找不到或不满足续航则逐个退末尾节点
 [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
     is_drone_served, warehouse, dist_matrix, last_recovery_node);
 
-if best_launch == 0 || best_recovery == 0
-    return;
-end
-
-% ----- 步骤3: 续航检测, 不满足则去掉添加的节点, 回退到单节点再检测 -----
-if min_flight_dist > max_range && length(service_nodes) > 1
-    service_nodes = start_node;
-    cumulative_demand = demands(start_node);
+while (best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range) ...
+        && length(service_nodes) > 1
+    removed = service_nodes(end);
+    service_nodes(end) = [];
+    cumulative_demand = cumulative_demand - demands(removed);
 
     [best_launch, best_recovery, min_flight_dist] = ...
         find_launch_recovery(service_nodes, vehicle_inner, ...
         is_drone_served, warehouse, dist_matrix, last_recovery_node);
-
-    if best_launch == 0 || best_recovery == 0
-        return;
-    end
 end
 
-% 单节点仍不满足续航 → 放弃
-if min_flight_dist > max_range
+% 退到单节点仍找不到发射/回收点或不满足续航 → 放弃
+if best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range
     return;
 end
 
-% ----- 步骤4: 分配成功 -----
+%分配成功
 if ~isempty(service_nodes)
     drone_tasks{end+1, 1} = best_launch;
     drone_tasks{end, 2} = service_nodes;
@@ -1235,7 +1282,7 @@ if ~isempty(service_nodes)
 end
 end
 
-%%                 染色体校验与修复
+%% 染色体校验与修复
 function chromosome = validate_and_repair(chromosome, n_nodes, warehouse, ...
     demands, dist_matrix, V_A, V_B, W_A, W_B, U_A, U_B)
 
