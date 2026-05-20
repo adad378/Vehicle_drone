@@ -10,13 +10,13 @@ service_T = 0;   % 车辆在每个投放点的服务时间 (小时), 约3分钟
 % --- 异构无人机参数 ---
 % 无人机A (重型长续航)
 V_A = V_T * 0.8;  % 无人机A速度 = 40 km/h
-W_A = 40;           % 无人机A载重能力 (kg)
+W_A = 90;           % 无人机A载重能力 (kg)
 U_A = 120;          % 无人机A续航里程 (km)
 service_D_A = 0; % 无人机A服务时间 (小时)
 
 % 无人机B (轻型短途快速)
 V_B = V_T * 1.2;  % 无人机B速度 = 60 km/h
-W_B = 20;           % 无人机B载重能力 (kg)
+W_B = 70;           % 无人机B载重能力 (kg)
 U_B = 80;           % 无人机B续航里程 (km)
 service_D_B = 0; % 无人机B服务时间 (小时)
 
@@ -37,7 +37,7 @@ min_util = 0.3;         % 车辆节点最低利用率阈值 (50%)
 fprintf('============================================\n\n');
 
 %% 获取算例数据
-[coords, demands, case_name] = get_crood_data('b1');
+[coords, demands, case_name] = get_crood_data('c1');
 n_nodes = size(coords, 1);
 warehouse = 1;
 
@@ -261,7 +261,7 @@ for gen = 2:max_gen
 
     
     % 生成剩余个体 (每次交叉产生两个子代, 按对处理)
-    MAX_CROSS_RETRY = 20;
+    MAX_CROSS_RETRY = 1e5;
     i = elite_count + 1;
     while i <= pop_size
         % 锦标赛选择
@@ -1140,7 +1140,7 @@ end
 %为多节点服务列表找最优发射/回收点
 [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
-    is_drone_served, warehouse, dist_matrix, last_recovery_node);
+    is_drone_served, is_locked, warehouse, dist_matrix, last_recovery_node);
 
 %找不到发射/回收点或不满足续航, 逐个退掉末尾服务节点
 while (best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range) ...
@@ -1151,7 +1151,7 @@ while (best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range) ..
 
     [best_launch, best_recovery, min_flight_dist] = ...
         find_launch_recovery(service_nodes, vehicle_inner, ...
-        is_drone_served, warehouse, dist_matrix, last_recovery_node);
+        is_drone_served, is_locked, warehouse, dist_matrix, last_recovery_node);
 end
 
 % 退到单节点仍找不到发射/回收点或不满足续航 → 放弃
@@ -1196,23 +1196,25 @@ end
 %% 为服务节点找最优发射/回收点
 function [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
-    is_drone_served, warehouse, dist_matrix, last_recovery_node)
+    is_drone_served, is_locked, warehouse, dist_matrix, last_recovery_node)
 
 n_inner = length(vehicle_inner);
 
-% 查找服务节点在 vehicle_inner 中的位置
-first_sv_pos = find(vehicle_inner == service_nodes(1), 1);
-last_sv_pos  = find(vehicle_inner == service_nodes(end), 1);
-
-% 查找 last_recovery_node 在 vehicle_inner 中的位置
-if last_recovery_node == 0 || last_recovery_node == warehouse
-    last_rec_pos = 0;
-else
-    last_rec_pos = find(vehicle_inner == last_recovery_node, 1);
-    if isempty(last_rec_pos)
-        last_rec_pos = 0;  % 未找到则按0处理(可能在之前被锁定移除了)
+    % 查找 last_recovery_node 在 vehicle_inner 中的位置
+    % 关键: 回收点到仓库 = 该类型无人机任务结束, 不再发射
+    if last_recovery_node == warehouse
+        best_launch = 0;
+        best_recovery = 0;
+        min_flight_dist = inf;
+        return;
+    elseif last_recovery_node == 0
+        last_rec_pos = 0;
+    else
+        last_rec_pos = find(vehicle_inner == last_recovery_node, 1);
+        if isempty(last_rec_pos)
+            last_rec_pos = 0;  % 未找到则按0处理(可能在之前被锁定移除了)
+        end
     end
-end
 
 % 构建发射候选集: 从上一个同类型回收点之后到车辆路径末尾
 % 发射点不限于第一个服务节点之前，可以在任意位置，只需在回收点之前
@@ -1233,7 +1235,7 @@ end
 
 for pos = start_pos:n_inner
     node = vehicle_inner(pos);
-    if ~is_drone_served(pos)
+    if ~is_drone_served(pos) && ~is_locked(pos)
         % 排除自身是服务节点的情况
         if ~ismember(node, service_nodes)
             launch_candidates = [launch_candidates, node];
@@ -1252,7 +1254,7 @@ recovery_positions = [recovery_positions, n_inner + 1];
 
 for posv = 1:n_inner
     node = vehicle_inner(posv);
-    if ~is_drone_served(posv)
+    if ~is_drone_served(posv) && ~is_locked(posv)
         if ~ismember(node, service_nodes)
             recovery_candidates = [recovery_candidates, node];
             recovery_positions = [recovery_positions, posv];
@@ -1333,7 +1335,7 @@ end
 %为多节点服务列表找最优发射/回收点, 找不到或不满足续航则逐个退末尾节点
 [best_launch, best_recovery, min_flight_dist] = ...
     find_launch_recovery(service_nodes, vehicle_inner, ...
-    is_drone_served, warehouse, dist_matrix, last_recovery_node);
+    is_drone_served, is_locked, warehouse, dist_matrix, last_recovery_node);
 
 while (best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range) ...
         && length(service_nodes) > 1
@@ -1343,7 +1345,7 @@ while (best_launch == 0 || best_recovery == 0 || min_flight_dist > max_range) ..
 
     [best_launch, best_recovery, min_flight_dist] = ...
         find_launch_recovery(service_nodes, vehicle_inner, ...
-        is_drone_served, warehouse, dist_matrix, last_recovery_node);
+        is_drone_served, is_locked, warehouse, dist_matrix, last_recovery_node);
 end
 
 % 退到单节点仍找不到发射/回收点或不满足续航 → 放弃
@@ -2883,7 +2885,7 @@ function offspring = process_offspring(offspring, Pm, parent, demands, dist_matr
     V_T, service_T, V_A, V_B, W_A, W_B, U_A, U_B, ...
     service_D_A, service_D_B, At_max, M, n_nodes, warehouse)
 
-MAX_MUTATE_RETRY = 20;
+MAX_MUTATE_RETRY = 1e5;
 
 % 变异操作
 if rand() < Pm
