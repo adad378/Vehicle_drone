@@ -7,7 +7,7 @@ fprintf('算例: %s\n', case_name);
 
 %% ==================== 1. 数据加载 ====================
 coord_c1 = [
-    20.71, 65.86,  0;
+    20.71, 65.86, 0;
     39.00,  5.00, 60;
     1.56, 41.11, 90;
     22.00, 75.00, 30;
@@ -56,23 +56,22 @@ dist_mat = squareform(pdist(coord_xy));  % 欧氏距离矩阵
 N = size(coord_points, 1);               % 节点总数
 demand  = coord_points(:, 3);            % 各节点需求量
 D = 2;                                    % 无人机数量
-
 %% ==================== 2. 参数设置====================
 V_t = 50;            % 车辆速度 (km/h)
 VA  = 0.8 * V_t;     % 无人机A速度 = 40 km/h
-VB  = 1.2 * V_t;     % 无人机B速度 = 100 km/h
+VB  = 1.2 * V_t;     % 无人机B速度 = 60 km/h
 V_drone = [VA, VB];
 
 UA = 120;            % 无人机A续航里程 (km)
 UB = 80;             % 无人机B续航里程 (km)
 U_range = [UA, UB];
 
-WA = 40;             % 无人机A载重 (kg)
-WB = 20;             % 无人机B载重 (kg)
+WA = 90;             % 无人机A载重 (kg)
+WB = 70;             % 无人机B载重 (kg)
 W_cap = [WA, WB];
 
-VT = 0.5;           % 车辆单点服务时间,小时
-DT = 0.5;           % 无人机单点服务时间
+VT = 0;           % 车辆单点服务时间,小时
+DT = 0;           % 无人机单点服务时间
 
 % 行驶时间矩阵
 tT_mat = dist_mat / V_t;              % 车辆行驶时间
@@ -80,7 +79,7 @@ tD_A_mat = dist_mat / VA;             % 无人机A飞行时间
 tD_B_mat = dist_mat / VB;             % 无人机B飞行时间
 tD_ij_d = cat(3, tD_A_mat, tD_B_mat);  % 无人机飞行时间矩阵 (N×N×D)
 Delta_t_max = 0.1;      % 1h等待窗口
-M       = 500;           % 大M常数 (收紧: 最大行程时间~30h)
+M       = 20;           % 大M常数
 M_mtz   = N;            % MTZ专用M
 
 
@@ -88,7 +87,7 @@ M_mtz   = N;            % MTZ专用M
 % --- 0-1变量 ---
 y_ij   = binvar(N, N, 'full');       % y_ij: 车辆从i行驶到j
 x_ij_d = binvar(N, N, D, 'full');    % x_ij^d: 无人机d从i飞行到j
-q_i    = binvar(N, 1, 'full');       % q_i: 节点i由车辆服务
+q_i    = binvar(N, 1, 'full');
 p_i_d  = binvar(N, D, 'full');       % p_i^d: 节点i由无人机d服务
 s_i_d  = binvar(N, D, 'full');       % s_i^d: 节点i是无人机d的发射点
 h_i_d  = binvar(N, D, 'full');       % h_i^d: 节点i是无人机d的回收点
@@ -98,7 +97,7 @@ tT_arr   = sdpvar(N, 1);              % 车辆到达节点i的时间
 tT_dep   = sdpvar(N, 1);              % 车辆离开节点i的时间
 tD_arr_d = sdpvar(N, D);              % 无人机d到达节点i的时间
 tD_dep_d = sdpvar(N, D);              % 无人机d离开节点i的时间
-LD       = sdpvar(N, D, 'full');      % 无人机d从节点i发射后的累计飞行距离
+LD       = sdpvar(N, D, 'full');      % 无人机d从节点i发射后的累计飞行时间
 
 %% ==================== 4. 约束条件构建 ====================
 cons = [];
@@ -119,6 +118,12 @@ end
 % (4.9) 车辆流量守恒: 对任意中间节点, 入度 = 出度
 for i = 2:N
     cons = [cons, sum(y_ij(i, :)) == sum(y_ij(:, i))];
+
+    %% 新增
+    cons = [cons, sum(y_ij(i, :)) <= 1];  % 每个节点最多被车辆访问一次
+    %% 车辆服务点必须有入边和出边
+    cons = [cons, sum(y_ij(i, :)) >= q_i(i)];
+    cons = [cons, sum(y_ij(:, i)) >= q_i(i)];
 end
 
 % (4.10) 车辆到达时间递推: tT_arr(j) ≥ tT_dep(i) + tT_ij - M(1-y_ij)
@@ -130,14 +135,16 @@ for i = 1:N
         end
     end
 end
-% (4.11) 车辆离开时间 ≥ 到达时间 + 服务时间
+% (4.11) 无人机离开时间 ≥ 到达时间 + 服务时间
 for d=1:D
     for i = 1:N
-        %车辆和无人机一起离开，tT_dep==tD_dep_d
-        % 发射点等待约束: 无人机起飞时间 - 到达时间 ≤ Δt_max
+        % 发射点等待约束: 无人机起飞时间 - 车辆到达时间 ≤ Δt_max + M*(1-s)
         cons = [cons, tD_dep_d(i, d) - tT_arr(i) <= Delta_t_max + M * (1 - s_i_d(i, d))];
-        % 回收点等待约束: 车辆离开时间 - 无人机到达时间 ≤ Δt_max
+        % 回收点等待约束: 车辆离开时间 - 无人机到达时间 ≤ Δt_max + M*(1-h)
         cons = [cons, tT_dep(i) - tD_arr_d(i, d) <= Delta_t_max + M * (1 - h_i_d(i, d))];
+        % 同一点内 max(tT_dep-tT_arr, tD_dep_d-tD_arr_d) <= Δt_max + M*(1-s-h)
+        cons = [cons, tT_dep(i) - tT_arr(i) <= Delta_t_max + M * (1 - s_i_d(i, d) - h_i_d(i, d))];
+        cons = [cons, tD_dep_d(i, d) - tD_arr_d(i, d) <= Delta_t_max + M * (1 - s_i_d(i, d) - h_i_d(i, d))];
     end
 end
 for d=1:D
@@ -145,13 +152,13 @@ for d=1:D
     for i = 1:N
         for j = 1:N
             if i ~= j
-                tD_ij = dist_mat(i, j) / V_drone(d);
+
                 % (4.12) 下界: tD_arr(j) ≥ tD_dep(i) + t_ij
                 cons = [cons, ...
-                    tD_arr_d(j, d) >= tD_dep_d(i, d) + tD_ij - M * (1 - x_ij_d(i, j, d))];
+                    tD_arr_d(j, d) >= tD_dep_d(i, d) + tD_ij_d(i, j, d) - M * (1 - x_ij_d(i, j, d))];
                 % (4.13) 上界: tD_arr(j) ≤ tD_dep(i) + t_ij
                 cons = [cons, ...
-                    tD_arr_d(j, d) <= tD_dep_d(i, d) + tD_ij + M * (1 - x_ij_d(i, j, d))];
+                    tD_arr_d(j, d) <= tD_dep_d(i, d) + tD_ij_d(i, j, d) + M * (1 - x_ij_d(i, j, d))];
             end
         end
     end
@@ -178,13 +185,13 @@ end
 for d=1:D
     % (4.16)
     %  Σ_j x_ij^d ≥ s_i^d + q_i - 1
-    % 若i是发射点且车辆服务点, 则必须有无人机出边
+    % 若有无人机出边, 则必须i是发射点且车辆服务点
     for i = 1:N
         cons = [cons, sum(x_ij_d(i, :, d)) >= s_i_d(i, d) + q_i(i) - 1];
     end
     % (4.17)
     % Σ_i x_ij^d ≥ h_j^d + q_j - 1
-    % 若j是回收点且车辆服务点, 则必须有无人机入边
+    % 若有无人机入边, 则必须j是回收点且车辆服务点
     for j = 1:N
         cons = [cons, sum(x_ij_d(:, j, d)) >= h_i_d(j, d) + q_i(j) - 1];
     end
@@ -232,16 +239,23 @@ for d=1:D
     end
     % (4.23) 发射点数 = 回收点数
     cons = [cons, sum(s_i_d(:, d)) == sum(h_i_d(:, d))];
-    for d = 1:D
-        % 如果存在无人机服务节点，则必须至少有一个发射点
-        for i = 1:N
-            cons = [cons, p_i_d(i, d) <= sum(s_i_d(:, d))];
-        end
-    end
+    % for d = 1:D
+    %     % 如果存在无人机服务节点，则必须至少有一个发射点
+    %     for i = 1:N
+    %         cons = [cons, p_i_d(i, d) >= sum(s_i_d(:, d))];
+    %     end
+    % end
 
     % (4.24) 发射点数 ≤ 服务点数
     cons = [cons, sum(s_i_d(:, d)) <= sum(p_i_d(:, d))];
 
+end
+%% 新增
+for d = 1:D
+    % 如果存在无人机服务节点，则发射点和回收点至少各1个
+    has_service = sum(p_i_d(:, d));
+    cons = [cons, sum(s_i_d(:, d)) >= has_service / N];
+    cons = [cons, sum(h_i_d(:, d)) >= has_service / N];
 end
 
 % (4.25) 车辆路径与服务点关联: 若y_ij=1 则 q_i=1 且 q_j=1
@@ -251,17 +265,13 @@ for i=1:N
         cons = [cons, y_ij(i,j) <= q_i(j)];
     end
 end
-%% 车辆服务点必须有入边和出边
-for i = 2:N
-    cons = [cons, sum(y_ij(i, :)) >= q_i(i)];
-    cons = [cons, sum(y_ij(:, i)) >= q_i(i)];
-end
 
-% (4.26) 路径存在性: 每个非仓库节点至少有一条入边
-for j = 2:N
-    cons = [cons, ...
-        sum(y_ij(:, j)) + sum(x_ij_d(:, j, 1)) + sum(x_ij_d(:, j, 2)) >= 1];
-end
+
+% % (4.26) 路径存在性: 每个非仓库节点至少有一条入边
+% for j = 2:N
+%     cons = [cons, ...
+%         sum(y_ij(:, j)) + sum(x_ij_d(:, j, 1)) + sum(x_ij_d(:, j, 2)) >= 1];
+% end
 
 % ========== 4.3 无人机约束 (逐架) ==========
 for d = 1:D
@@ -274,21 +284,32 @@ for d = 1:D
     cons = [cons, s_i_d(:, d) <= q_i];
     cons = [cons, h_i_d(:, d) <= q_i];
 
-    % (4.29)
+    % % (4.29)
+    % for i = 1:N
+    %     for j = 1:N
+    %         if i == j, continue; end
+    %         for k = 1:N
+    %             if j == k || i == k, continue; end
+    %             cons = [cons, ...
+    %                 LD(i, d) >= tD_ij_d(i,j,d) + tD_ij_d(j,k,d) ...
+    %                 - M * ( (1 - x_ij_d(i,j,d)) + (1 - x_ij_d(j,k,d)) + (1 - s_i_d(i,d)) ) ];
+    %         end
+    %     end
+    % end
+
+    % % (4.30)/(4.31) 续航里程限制
+    % cons = [cons, LD(:, d) <= U_range(d)];
+
+    %% 新增续航约束
+    for k = 1:D
+    total_dist = 0;
     for i = 1:N
         for j = 1:N
-            if i == j, continue; end
-            for k = 1:N
-                if j == k || i == k, continue; end
-                cons = [cons, ...
-                    LD(i, d)/V_drone(d) >= tD_ij_d(i,j,d) + tD_ij_d(j,k,d) ...
-                    - M * ( (1 - x_ij_d(i,j,d)) + (1 - x_ij_d(j,k,d)) + (1 - s_i_d(i,d)) ) ];
-            end
+            total_dist = total_dist + dist_mat(i, j) * x_ij_d(i, j, k);
         end
     end
-
-    % (4.30)/(4.31) 续航里程限制
-    cons = [cons, LD(:, d) <= U_range(d)];
+    cons = [cons, total_dist <= U_range(k)];
+    end
 
     %% (4.32)/(4.33) 载重限制: Σ(p_i^d * demand_i) ≤ W_cap(d)
     cons = [cons, p_i_d(:, d)' * demand <= W_cap(d)];
@@ -296,20 +317,20 @@ for d = 1:D
 end
 
 % ========== 时间相关约束 ==========
-
+%% 新增
 % 车辆出发时间 ≥ 到达时间 + 服务时间 (仅对车辆服务节点)
 for i = 2:N
-    cons = [cons, tT_dep(i) >= tT_arr(i) + VT * q_i(i)];
+    cons = [cons, tT_dep(i) == tT_arr(i) + VT * q_i(i)];
 end
 %仓库出发时间为0
 cons = [cons, tT_dep(1) == 0];
 
-% 无人机出发时间 ≥ 到达时间 + 服务时间 (仅对无人机服务节点)
-for d = 1:D
-    for i = 2:N
-        cons = [cons, tD_dep_d(i, d) >= tD_arr_d(i, d) + DT * p_i_d(i, d)];
-    end
-end
+% % 无人机出发时间 ≥ 到达时间 + 服务时间 (仅对无人机服务节点)
+% for d = 1:D
+%     for i = 2:N
+%         cons = [cons, tD_dep_d(i, d) >= tD_arr_d(i, d) + DT * p_i_d(i, d)];
+%     end
+% end
 
 % 时间变量非负 (4.35)(4.36)
 cons = [cons, tT_arr >= 0, tT_dep >= 0];
@@ -317,7 +338,7 @@ cons = [cons, tD_arr_d(:) >= 0, tD_dep_d(:) >= 0];
 
 % 飞行距离非负 (4.39)
 cons = [cons, LD(:) >= 0];
-
+%% 新增
 % 未访问节点时间清零
 for i = 1:N
     % 车辆未服务节点 → 车辆时间=0
@@ -329,9 +350,58 @@ for i = 1:N
         cons = [cons, tD_dep_d(i, d) <= M * (p_i_d(i, d) + s_i_d(i, d) + h_i_d(i, d))];
     end
 end
+%% 无人机时间与车辆时间同步
+for d = 1:D
+    for i = 1:N
+        % 发射点：无人机到达时间 == 车辆到达时间
+        cons = [cons, tD_arr_d(i, d) >= tT_arr(i) - M * (1 - s_i_d(i, d))];
+        cons = [cons, tD_arr_d(i, d) <= tT_arr(i) + M * (1 - s_i_d(i, d))];
+        
+        % 发射点：无人机离开时间 == 车辆离开时间
+        cons = [cons, tD_dep_d(i, d) >= tT_dep(i) - M * (1 - s_i_d(i, d))];
+        cons = [cons, tD_dep_d(i, d) <= tT_dep(i) + M * (1 - s_i_d(i, d))];
+        
+        % 回收点：无人机到达时间 == 车辆到达时间
+        cons = [cons, tD_arr_d(i, d) >= tT_arr(i) - M * (1 - h_i_d(i, d))];
+        cons = [cons, tD_arr_d(i, d) <= tT_arr(i) + M * (1 - h_i_d(i, d))];
+    end
+end
+%% 无人机离开时间与车辆离开时间相等
+for d = 1:D
+    for i = 1:N
+        % 无人机起飞时间 == 车辆离开时间
+        cons = [cons, tD_dep_d(i, d) >= tT_dep(i) - M * (1 - s_i_d(i, d))];
+        cons = [cons, tD_dep_d(i, d) <= tT_dep(i) + M * (1 - s_i_d(i, d))];
+    end
+end
+for d = 1:D
+    for i = 1:N
+        % 无人机到达时间 == 车辆到达时间
+        cons = [cons, tD_arr_d(i, d) >= tT_arr(i) - M * (1 - h_i_d(i, d))];
+        cons = [cons, tD_arr_d(i, d) <= tT_arr(i) + M * (1 - h_i_d(i, d))];
+    end
+end
+%% 新增
+%无人机网络流约束
+for d = 1:D
+    for i = 1:N
+        outflow = sum(x_ij_d(i, :, d));
+        inflow  = sum(x_ij_d(:, i, d));
+        
+        % 流量守恒：发射点净出1，回收点净入1，中间点净0
+        cons = [cons, outflow - inflow == s_i_d(i, d) - h_i_d(i, d)];
+        
+        % 每个节点最多一条出边、一条入边
+        cons = [cons, outflow <= 1, inflow <= 1];
+        
+        % 强制普通服务节点（p=1且s=0且h=0）必须有出边和入边
+        cons = [cons, outflow >= p_i_d(i, d) - s_i_d(i, d) - h_i_d(i, d)];
+        cons = [cons, inflow  >= p_i_d(i, d) - s_i_d(i, d) - h_i_d(i, d)];
+    end
+end
 
 %%目标函数
-Objective = sum(tT_arr(2:end));
+Objective = tT_arr(1);
 
 
 %%求解
@@ -340,7 +410,7 @@ fprintf('约束总数: %d\n', length(cons));
 fprintf('目标函数: Σ t_j^{T+} (车辆到达各投放点时间之和)\n');
 
 ops = sdpsettings('solver', 'gurobi', 'verbose', 1, ...
-    'gurobi.TimeLimit', 600, 'gurobi.MIPGap', 1e-4, ...
+    'gurobi.TimeLimit', 5000000, 'gurobi.MIPGap', 1e-4, ...
     'gurobi.LPWarmStart', 0, 'gurobi.MIPFocus', 1, ...
     'gurobi.Cuts', 3, 'gurobi.Heuristics', 0.5);
 
